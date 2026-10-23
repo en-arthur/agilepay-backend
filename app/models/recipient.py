@@ -1,6 +1,6 @@
 from sqlalchemy import Column, String, DateTime, ForeignKey, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship as orm_relationship
 from datetime import datetime, timezone
 import uuid
 
@@ -42,8 +42,8 @@ class Recipient(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
-    merchant    = relationship("Merchant", back_populates="recipients")
-    remittances = relationship(
+    merchant    = orm_relationship("Merchant", back_populates="recipients")
+    remittances = orm_relationship(
         "Transaction",
         back_populates="recipient",
         foreign_keys="Transaction.recipient_id",

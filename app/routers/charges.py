@@ -104,7 +104,7 @@ def create_charge(
         status          = "PENDING",
         description     = body.description,
         reference_id    = body.reference_id,
-        metadata        = body.metadata or {},
+        tx_metadata     = body.metadata or {},
         idempotency_key = body.idempotency_key,
     )
     db.add(tx)

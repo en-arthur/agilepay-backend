@@ -47,7 +47,9 @@ class Transaction(Base):
     description     = Column(String)
     reference_id    = Column(String)
     memo            = Column(String)
-    metadata        = Column(JSONB, default=dict)
+    # NOTE: "metadata" is reserved by SQLAlchemy's Declarative API (Base.metadata),
+    # so the attribute is tx_metadata. It is serialized as "metadata" in the API.
+    tx_metadata     = Column(JSONB, default=dict)
     idempotency_key = Column(String, unique=True)
 
     created_at = Column(

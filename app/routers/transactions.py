@@ -32,7 +32,7 @@ def _fmt(tx: Transaction) -> dict:
         "destination_id":       str(tx.destination_id) if tx.destination_id else None,
         "payment_link_id":      str(tx.payment_link_id) if tx.payment_link_id else None,
         "recipient_id":         str(tx.recipient_id) if tx.recipient_id else None,
-        "metadata":             tx.metadata or {},
+        "metadata":             tx.tx_metadata or {},
         "created_at":           tx.created_at.isoformat(),
         "updated_at":           tx.updated_at.isoformat() if tx.updated_at else None,
         "completed_at":         tx.completed_at.isoformat() if tx.completed_at else None,
