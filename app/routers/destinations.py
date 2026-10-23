@@ -96,10 +96,11 @@ def _holder_block(merchant: Merchant, body: DestinationRequest, rail: str) -> di
         "taxId": tax_id,
     }
 
-    # SPEI only takes type + taxId; sending relationship/address is accepted but
-    # unnecessary. ACH/FEDWIRE have no `name` property (it is `legalName`), and
-    # sending one fails with "property name should not exist".
+    # SPEI only takes type + taxId (+ name); sending relationship/address is
+    # accepted but unnecessary. ACH/FEDWIRE have no `name` property (it is
+    # `legalName`), and sending one fails with "property name should not exist".
     if rail == "SPEI":
+        holder["name"] = body.holder_name
         return holder
 
     country = (
