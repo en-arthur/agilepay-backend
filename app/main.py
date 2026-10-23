@@ -7,6 +7,8 @@ Startup order:
   3. Register all routers under /v1/* (and /pay/* for public checkout)
   4. Expose a /health endpoint for Railway / Render health checks
 """
+import re
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -55,6 +57,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Duplicate-slash tolerance ─────────────────────────────────────────────────
+class CollapseDuplicateSlashes:
+    """
+    Treat `//v1/auth/signup` as `/v1/auth/signup`.
+
+    Clients that paste a base URL with a trailing slash and then append a path
+    that also starts with "/" produce double slashes, which Starlette answers
+    with a bare 404 Not Found. Normalising the path here keeps every route
+    reachable regardless of how the caller joins the URL.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in {"http", "websocket"}:
+            path = scope.get("path", "")
+            if "//" in path:
+                collapsed = re.sub(r"/{2,}", "/", path)
+                scope = dict(scope)
+                scope["path"] = collapsed
+                scope["raw_path"] = collapsed.encode()
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(CollapseDuplicateSlashes)
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 app.include_router(auth.router,         prefix="/v1/auth",         tags=["Auth"])
