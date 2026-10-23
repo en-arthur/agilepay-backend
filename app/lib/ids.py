@@ -21,6 +21,11 @@ def generate_link_id() -> str:
     return f"lnk_{_nanoid(12)}"
 
 
+def generate_collection_id() -> str:
+    """Return a unique collection (on-ramp) ID, e.g.  col_aB3xK9mN1pQr2sT4"""
+    return f"col_{_nanoid(20)}"
+
+
 def generate_api_key(environment: str) -> tuple[str, str, str, str]:
     """
     Generate a new API key.

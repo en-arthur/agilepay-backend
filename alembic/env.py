@@ -12,6 +12,7 @@ from app.models.destination import Destination  # noqa: F401
 from app.models.recipient import Recipient  # noqa: F401
 from app.models.transaction import Transaction  # noqa: F401
 from app.models.payment_link import PaymentLink  # noqa: F401
+from app.models.collection import Collection  # noqa: F401
 from app.models.partner_fee_config import PartnerFeeConfig  # noqa: F401
 from app.models.webhook_log import WebhookLog  # noqa: F401
 

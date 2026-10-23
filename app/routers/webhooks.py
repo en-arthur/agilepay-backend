@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
+from app.models.collection import Collection
 from app.models.destination import Destination
 from app.models.merchant import Merchant
 from app.models.transaction import Transaction
@@ -171,6 +172,31 @@ def _find_transaction(db: Session, data: dict) -> Transaction | None:
     return None
 
 
+def _find_collection(db: Session, data: dict) -> Collection | None:
+    """Locate the Collection a Lumx on-ramp event refers to."""
+    lumx_tx_id = data.get("id")
+    if lumx_tx_id:
+        collection = (
+            db.query(Collection)
+            .filter(Collection.lumx_transaction_id == lumx_tx_id)
+            .first()
+        )
+        if collection:
+            return collection
+
+    metadata = (
+        (data.get("request") or {}).get("metadata") or data.get("metadata") or {}
+    )
+    collection_id = metadata.get("agilepay_collection_id")
+    if collection_id:
+        return (
+            db.query(Collection)
+            .filter(Collection.collection_id == collection_id)
+            .first()
+        )
+    return None
+
+
 def _find_merchant(db: Session, data: dict) -> Merchant | None:
     # Customer events carry both `id` and `customerId`; accept either.
     for key in ("customerId", "id"):
@@ -209,8 +235,58 @@ _TRANSACTION_STATUS = {
 }
 
 
+_COLLECTION_STATUS = {
+    "onramp.awaiting_funds":          "AWAITING_FUNDS",
+    "onramp.transferring_stablecoin": "PROCESSING",
+    "onramp.trading":                 "PROCESSING",
+    "onramp.transferring_fiat":      "PROCESSING",
+    "onramp.success":                 "COMPLETED",
+    "onramp.failed":                  "FAILED",
+    "onramp.expired":                 "EXPIRED",
+}
+
+
+def _apply_collection_event(
+    event_type: str,
+    collection: Collection,
+    data: dict,
+    now: datetime,
+) -> None:
+    state = data.get("state") or {}
+
+    # Keep the payer instructions current (Lumx may re-issue them).
+    payment = state.get("payment")
+    if payment:
+        collection.payment_details = payment
+
+    status = _COLLECTION_STATUS.get(event_type) or (state.get("status") or "").upper()
+    if status:
+        collection.status = status
+
+    if status == "COMPLETED":
+        receipt = state.get("receipt") or {}
+        final_target = _decimal(receipt.get("finalTargetAmount"))
+        final_rate = _decimal(receipt.get("finalExchangeRate"))
+        if final_target is not None:
+            collection.target_amount = final_target
+        if final_rate is not None:
+            collection.exchange_rate = final_rate
+        collection.completed_at = collection.completed_at or now
+    elif status in {"FAILED", "EXPIRED", "CANCELLED"}:
+        collection.failed_at = collection.failed_at or now
+
+
 def _handle_event(event_type: str, data: dict, db: Session) -> None:
     now = datetime.now(timezone.utc)
+
+    # ── Collections (fiat on-ramp) ───────────────────────────────────────────
+    # Handled before the generic transaction block: a collection is its own
+    # row, and `onramp.*` events for remittance deposits have no Collection.
+    if event_type.startswith("onramp."):
+        collection = _find_collection(db, data)
+        if collection:
+            _apply_collection_event(event_type, collection, data, now)
+            return
 
     # ── Transactions ─────────────────────────────────────────────────────────
     if event_type in _TRANSACTION_STATUS:

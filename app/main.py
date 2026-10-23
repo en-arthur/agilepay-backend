@@ -22,6 +22,7 @@ from app.models.destination import Destination  # noqa: F401
 from app.models.recipient import Recipient  # noqa: F401
 from app.models.transaction import Transaction  # noqa: F401
 from app.models.payment_link import PaymentLink  # noqa: F401
+from app.models.collection import Collection  # noqa: F401
 from app.models.partner_fee_config import PartnerFeeConfig  # noqa: F401
 from app.models.webhook_log import WebhookLog  # noqa: F401
 
@@ -32,6 +33,7 @@ from app.routers import (
     api_keys,
     destinations,
     charges,
+    collections,
     links,
     transactions,
     checkout,
@@ -92,6 +94,7 @@ app.include_router(merchants.router,    prefix="/v1/merchants",    tags=["Mercha
 app.include_router(api_keys.router,     prefix="/v1/api-keys",     tags=["API Keys"])
 app.include_router(destinations.router, prefix="/v1/destinations", tags=["Destinations"])
 app.include_router(charges.router,      prefix="/v1/charges",      tags=["Charges"])
+app.include_router(collections.router,  prefix="/v1/collections",  tags=["Collections"])
 app.include_router(links.router,        prefix="/v1/links",        tags=["Payment Links"])
 app.include_router(transactions.router, prefix="/v1/transactions", tags=["Transactions"])
 app.include_router(checkout.router,     prefix="/pay",             tags=["Checkout"])

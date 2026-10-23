@@ -50,3 +50,4 @@ class PaymentLink(Base):
 
     merchant     = relationship("Merchant", back_populates="payment_links")
     transactions = relationship("Transaction", back_populates="payment_link")
+    collections  = relationship("Collection", back_populates="payment_link")

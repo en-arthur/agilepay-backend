@@ -64,6 +64,7 @@ class Merchant(Base):
     api_keys           = relationship("ApiKey", back_populates="merchant", cascade="all, delete")
     destinations       = relationship("Destination", back_populates="merchant", cascade="all, delete")
     transactions       = relationship("Transaction", back_populates="merchant")
+    collections        = relationship("Collection", back_populates="merchant", cascade="all, delete")
     payment_links      = relationship("PaymentLink", back_populates="merchant", cascade="all, delete")
     partner_fee_config = relationship(
         "PartnerFeeConfig", back_populates="merchant", uselist=False, cascade="all, delete"

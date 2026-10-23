@@ -1,33 +1,34 @@
 """
 Public hosted checkout — no auth required.
 
-GET  /pay/{link_id}           — return link metadata for the checkout page
-POST /pay/{link_id}           — payer submits their details → creates a charge
+GET  /pay/{link_id}                              — link metadata for the checkout page
+POST /pay/{link_id}                              — payer submits details → creates a
+                                                   fiat COLLECTION (on-ramp) and
+                                                   returns the payment instructions
+GET  /pay/{link_id}/collections/{collection_id}  — poll the collection status
+
+Money flows IN: the payer sends fiat to the Lumx virtual account (or PIX code)
+returned by POST. When Lumx confirms it (`onramp.success` webhook) the
+merchant's USDC balance is credited and the collection flips to COMPLETED.
 """
 from typing import Optional
-import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.database import get_db
-from app.lib.ids import generate_charge_id
-from app.models.destination import Destination
+from app.models.collection import Collection
+from app.models.merchant import Merchant
 from app.models.payment_link import PaymentLink
-from app.models.transaction import Transaction
-from app.services.lumx import LumxError, lumx
+from app.services.collections import (
+    create_collection,
+    fmt as fmt_collection,
+    refresh_collection,
+    resolve_rail,
+)
 
 router = APIRouter()
-
-
-def _is_uuid(value: str) -> bool:
-    try:
-        uuid.UUID(value)
-        return True
-    except (ValueError, AttributeError, TypeError):
-        return False
 
 
 class CheckoutRequest(BaseModel):
@@ -37,32 +38,46 @@ class CheckoutRequest(BaseModel):
     amount_cents: Optional[int] = None   # only if link is variable-amount
 
 
-# ── GET /pay/{link_id} — public metadata ─────────────────────────────────────
-
-@router.get("/{link_id}")
-def get_checkout(link_id: str, db: Session = Depends(get_db)):
+def _active_link(link_id: str, db: Session) -> PaymentLink:
     link = db.query(PaymentLink).filter(PaymentLink.link_id == link_id).first()
     if not link:
         raise HTTPException(404, "Payment link not found")
     if not link.is_active:
         raise HTTPException(410, "This payment link is no longer active")
-    if link.max_uses and link.use_count >= link.max_uses:
+    if link.max_uses and (link.use_count or 0) >= link.max_uses:
         raise HTTPException(410, "This payment link has reached its maximum uses")
+    return link
+
+
+# ── GET /pay/{link_id} — public metadata ─────────────────────────────────────
+
+@router.get("/{link_id}")
+def get_checkout(link_id: str, db: Session = Depends(get_db)):
+    link = _active_link(link_id, db)
+    currency = (link.currency or "USD").upper()
+
+    # Tell the checkout page which rail will be used, so it can label the
+    # payment instructions correctly ("Bank transfer (SWIFT)" etc.).
+    try:
+        rail = resolve_rail(currency, None)
+    except HTTPException:
+        rail = None
 
     return {
         "link_id":        link.link_id,
         "title":          link.title,
         "description":    link.description,
         "amount_cents":   link.amount_cents,
-        "currency":       link.currency,
+        "currency":       currency,
         "is_fixed_amount": link.is_fixed_amount,
         "min_amount_cents": link.min_amount_cents,
         "max_amount_cents": link.max_amount_cents,
         "logo_url":       link.logo_url,
+        "rail":           rail,
     }
 
 
-# ── POST /pay/{link_id} — payer submits ───────────────────────────────────────
+# ── POST /pay/{link_id} — payer submits → create a collection ────────────────
 
 @router.post("/{link_id}", status_code=202)
 def submit_checkout(
@@ -70,15 +85,10 @@ def submit_checkout(
     body: CheckoutRequest,
     db: Session = Depends(get_db),
 ):
-    link = db.query(PaymentLink).filter(PaymentLink.link_id == link_id).first()
-    if not link:
-        raise HTTPException(404, "Payment link not found")
-    if not link.is_active:
-        raise HTTPException(410, "This payment link is no longer active")
-    if link.max_uses and link.use_count >= link.max_uses:
-        raise HTTPException(410, "This payment link has reached its maximum uses")
+    link = _active_link(link_id, db)
+    currency = (link.currency or "USD").upper()
 
-    # Resolve amount
+    # Resolve amount (in the link's currency)
     if link.is_fixed_amount:
         if not link.amount_cents:
             raise HTTPException(500, "Fixed-amount link has no amount set")
@@ -92,97 +102,62 @@ def submit_checkout(
             raise HTTPException(400, f"Maximum amount is {link.max_amount_cents} cents")
         amount_cents = body.amount_cents
 
-    amount_usdc = amount_cents / 100.0  # simple 1:1 USD → USDC conversion
+    merchant = db.query(Merchant).filter(Merchant.id == link.merchant_id).first()
+    if not merchant:
+        raise HTTPException(404, "Merchant not found")
 
-    # Resolve destination (default destination on the link, fallback to first approved)
-    destination: Optional[Destination] = None
-    if link.default_destination_id:
-        destination = db.query(Destination).filter(
-            Destination.id == link.default_destination_id,
-            Destination.status == "APPROVED",
-        ).first()
-
-    if not destination:
-        destination = (
-            db.query(Destination)
-            .filter(
-                Destination.merchant_id == link.merchant_id,
-                Destination.status      == "APPROVED",
-            )
-            .first()
-        )
-
-    if not destination:
-        raise HTTPException(503, "No approved destination available for this merchant")
-
-    charge_id = generate_charge_id()
-
-    tx = Transaction(
-        merchant_id     = link.merchant_id,
-        destination_id  = destination.id,
-        payment_link_id = link.id,
-        charge_id       = charge_id,
-        source_amount   = amount_usdc,
-        source_currency = "USDC",
-        target_currency = destination.currency,
-        type            = "OFF_RAMP",
-        status          = "PENDING",
-        payer_name      = body.payer_name,
-        payer_email     = body.payer_email,
-        payer_phone     = body.payer_phone,
+    collection = create_collection(
+        db,
+        merchant,
+        amount          = amount_cents / 100.0,
+        currency        = currency,
         description     = link.title,
+        payer_name      = body.payer_name,
+        payer_email     = str(body.payer_email),
+        payer_phone     = body.payer_phone,
+        payment_link_id = link.id,
+        metadata        = {"payment_link_id": link.link_id},
     )
-    db.add(tx)
-    db.flush()
 
-    try:
-        payload: dict = {
-            "destinationId":  destination.lumx_destination_id,
-            "sourceCurrency": "USDC",
-            "sourceAmount":   f"{amount_usdc:.2f}",
-            "purpose":        "TRADE_TRANSACTIONS",
-            "metadata": {
-                "agilepay_charge_id":      charge_id,
-                "agilepay_transaction_id": str(tx.id),
-                "payer_email":             body.payer_email,
-            },
-        }
-        # Same rules as POST /v1/charges: only send a blockchain the project
-        # actually has wallets on, and only a real partner-fee UUID.
-        if settings.LUMX_BLOCKCHAIN:
-            payload["blockchain"] = settings.LUMX_BLOCKCHAIN
-        if _is_uuid(settings.LUMX_PARTNER_FEE_ID):
-            payload["partnerFeeId"] = settings.LUMX_PARTNER_FEE_ID
-
-        lumx_response = lumx.create_offramp(
-            payload=payload,
-            idempotency_key=str(uuid.uuid4()),
-        )
-    except LumxError as exc:
-        tx.status = "FAILED"
-        db.commit()
-        raise HTTPException(
-            502,
-            f"Payment network rejected the payment: {exc.body[:400]}",
-        )
-    except Exception:
-        tx.status = "FAILED"
-        db.commit()
-        raise HTTPException(502, "Payment processing unavailable. Please try again.")
-
-    tx.lumx_transaction_id = lumx_response["id"]
-    tx.status = "PROCESSING"
-
-    # Increment use counter
     link.use_count = (link.use_count or 0) + 1
-
     db.commit()
 
     return {
-        "charge_id":     charge_id,
-        "status":        "PROCESSING",
-        "amount_cents":  amount_cents,
-        "currency":      link.currency,
-        "success_url":   link.success_url,
-        "message":       "Payment initiated. You will receive a confirmation email.",
+        "collection_id":   collection.collection_id,
+        "status":          collection.status,
+        "rail":            collection.rail,
+        "amount":          float(collection.source_amount),
+        "currency":        collection.source_currency,
+        "target_currency": collection.target_currency,
+        "payment":         collection.payment_details or {},
+        "success_url":     link.success_url,
+        "message":         "Send the exact amount using the details below. "
+                           "Include the reference so we can match your payment.",
     }
+
+
+# ── GET /pay/{link_id}/collections/{collection_id} — status poll ─────────────
+
+@router.get("/{link_id}/collections/{collection_id}")
+def get_checkout_collection(
+    link_id: str,
+    collection_id: str,
+    db: Session = Depends(get_db),
+):
+    link = db.query(PaymentLink).filter(PaymentLink.link_id == link_id).first()
+    if not link:
+        raise HTTPException(404, "Payment link not found")
+
+    collection = (
+        db.query(Collection)
+        .filter(
+            Collection.collection_id == collection_id,
+            Collection.payment_link_id == link.id,
+        )
+        .first()
+    )
+    if not collection:
+        raise HTTPException(404, "Collection not found")
+
+    collection = refresh_collection(db, collection)
+    return fmt_collection(collection)
