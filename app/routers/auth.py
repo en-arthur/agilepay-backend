@@ -23,7 +23,7 @@ from app.lib.countries import UnsupportedCountry, to_alpha3
 from app.lib.ids import generate_api_key
 from app.models.api_key import ApiKey
 from app.models.merchant import Merchant
-from app.services.lumx import lumx
+from app.services.lumx import LumxError, lumx
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +169,8 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
             logger.exception("Could not roll back Supabase user %s", auth_user_id)
 
         detail = "Failed to provision payment account"
-        response = getattr(exc, "response", None)
-        if response is not None:
-            try:
-                upstream = response.json()
-                reason = upstream.get("message") or upstream.get("error") or upstream
-                detail = f"{detail}: {str(reason)[:300]}"
-            except Exception:  # noqa: BLE001
-                detail = f"{detail}: HTTP {response.status_code}"
+        if isinstance(exc, LumxError):
+            detail = f"{detail}: {exc.body[:300]}"
         raise HTTPException(502, detail)
 
     # 3. Create merchant row ───────────────────────────────────────────────────
