@@ -17,9 +17,17 @@ from app.lib.ids import generate_charge_id
 from app.models.destination import Destination
 from app.models.payment_link import PaymentLink
 from app.models.transaction import Transaction
-from app.services.lumx import lumx
+from app.services.lumx import LumxError, lumx
 
 router = APIRouter()
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 class CheckoutRequest(BaseModel):
@@ -128,21 +136,34 @@ def submit_checkout(
     db.flush()
 
     try:
-        lumx_response = lumx.create_offramp(
-            payload={
-                "destinationId":  destination.lumx_destination_id,
-                "sourceCurrency": "USDC",
-                "sourceAmount":   f"{amount_usdc:.2f}",
-                "purpose":        "TRADE_TRANSACTIONS",
-                "blockchain":     "BASE",
-                "partnerFeeId":   settings.LUMX_PARTNER_FEE_ID,
-                "metadata": {
-                    "agilepay_charge_id":      charge_id,
-                    "agilepay_transaction_id": str(tx.id),
-                    "payer_email":             body.payer_email,
-                },
+        payload: dict = {
+            "destinationId":  destination.lumx_destination_id,
+            "sourceCurrency": "USDC",
+            "sourceAmount":   f"{amount_usdc:.2f}",
+            "purpose":        "TRADE_TRANSACTIONS",
+            "metadata": {
+                "agilepay_charge_id":      charge_id,
+                "agilepay_transaction_id": str(tx.id),
+                "payer_email":             body.payer_email,
             },
+        }
+        # Same rules as POST /v1/charges: only send a blockchain the project
+        # actually has wallets on, and only a real partner-fee UUID.
+        if settings.LUMX_BLOCKCHAIN:
+            payload["blockchain"] = settings.LUMX_BLOCKCHAIN
+        if _is_uuid(settings.LUMX_PARTNER_FEE_ID):
+            payload["partnerFeeId"] = settings.LUMX_PARTNER_FEE_ID
+
+        lumx_response = lumx.create_offramp(
+            payload=payload,
             idempotency_key=str(uuid.uuid4()),
+        )
+    except LumxError as exc:
+        tx.status = "FAILED"
+        db.commit()
+        raise HTTPException(
+            502,
+            f"Payment network rejected the payment: {exc.body[:400]}",
         )
     except Exception:
         tx.status = "FAILED"
