@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.lib.auth import get_api_key_context, ApiKeyContext, get_current_merchant
+from app.lib.countries import UnsupportedCountry, to_alpha3
 from app.lib.rails import get_rail_config, list_supported_countries
 from app.lib.validators import validate_destination_identifier
 from app.models.destination import Destination
@@ -38,6 +39,123 @@ class DestinationRequest(BaseModel):
     country:     str
     holder_name: str
     identifier:  dict[str, Any]
+    # Lumx requires a `holder` block for SEPA / ACH / FEDWIRE / FPS / SWIFT and
+    # a `bank` block for the same rails. PIX only needs the identifier, SPEI
+    # needs type + taxId. Everything here defaults to the merchant's own KYC
+    # data (the destination holder is the merchant, relationship SELF).
+    holder_tax_id:            Optional[str] = None
+    holder_address_country:   Optional[str] = None
+    bank_name:                Optional[str] = None
+    bank_address_country:     Optional[str] = None
+    bank_address_line1:       Optional[str] = None
+    bank_address_city:        Optional[str] = None
+    bank_address_state:       Optional[str] = None
+    bank_address_postal_code: Optional[str] = None
+
+
+# Rails whose Lumx payload requires a `holder` object.
+HOLDER_REQUIRED_RAILS = {"SEPA", "ACH", "FEDWIRE", "FPS", "SWIFT"}
+# Rails whose Lumx payload requires a `bank` object.
+BANK_REQUIRED_RAILS = {"SEPA", "ACH", "FEDWIRE", "FPS", "SWIFT"}
+# ACH/FEDWIRE use the stricter bank address schema (all fields required).
+FULL_BANK_ADDRESS_RAILS = {"ACH", "FEDWIRE"}
+
+
+def _normalise_identifier(rail: str, identifier: dict[str, Any]) -> dict[str, Any]:
+    """
+    Map AgilePay's identifier keys onto Lumx's per-rail identifiers.
+
+    The dashboard/API use `accountType` for ACH and FEDWIRE, while Lumx expects
+    `type` (and rejects unknown properties). FEDWIRE omits `type` upstream, so
+    default it to CHECKING.
+    """
+    ident = dict(identifier)
+
+    if rail in {"ACH", "FEDWIRE"}:
+        account_type = ident.pop("accountType", None)
+        ident.setdefault("type", account_type or "CHECKING")
+
+    return ident
+
+
+def _holder_block(merchant: Merchant, body: DestinationRequest, rail: str) -> dict:
+    """Build the Lumx `holder` object, defaulting to the merchant's KYC data."""
+    # SELF destinations must match the customer's KYC identity, otherwise Lumx
+    # rejects with HOLDER_TAX_ID_MISMATCH / HOLDER_TYPE_MISMATCH.
+    tax_id = body.holder_tax_id or merchant.tax_id
+    if not tax_id:
+        raise HTTPException(
+            400,
+            f"holder_tax_id required for {rail} destinations "
+            "(it must match the account holder's tax ID)",
+        )
+
+    holder: dict[str, Any] = {
+        "type": "BUSINESS" if merchant.business_type == "BUSINESS" else "INDIVIDUAL",
+        "relationship": "SELF",
+        "taxId": tax_id,
+    }
+
+    # SPEI only takes type + taxId; sending relationship/address is accepted but
+    # unnecessary. ACH/FEDWIRE have no `name` property (it is `legalName`), and
+    # sending one fails with "property name should not exist".
+    if rail == "SPEI":
+        return holder
+
+    country = (
+        body.holder_address_country
+        or merchant.address_country
+        or merchant.country
+        or body.country
+    )
+    try:
+        holder["address"] = {"country": to_alpha3(country)}
+    except UnsupportedCountry as exc:
+        raise HTTPException(400, str(exc))
+
+    if rail in {"ACH", "FEDWIRE"}:
+        if holder["type"] == "BUSINESS":
+            holder["legalName"] = merchant.business_name or body.holder_name
+    else:
+        holder["name"] = body.holder_name
+
+    return holder
+
+
+def _bank_block(merchant: Merchant, body: DestinationRequest, rail: str) -> dict:
+    """Build the Lumx `bank` object required by non-PIX/SPEI rails."""
+    name = body.bank_name or merchant.business_name
+    if not name:
+        raise HTTPException(400, f"bank_name required for {rail} destinations")
+
+    country = (
+        body.bank_address_country
+        or merchant.address_country
+        or body.country
+    )
+    try:
+        address: dict[str, Any] = {"country": to_alpha3(country)}
+    except UnsupportedCountry as exc:
+        raise HTTPException(400, str(exc))
+
+    if rail in FULL_BANK_ADDRESS_RAILS:
+        # ACH / FEDWIRE require a complete bank address.
+        fields = {
+            "line1":      body.bank_address_line1 or merchant.address_line1,
+            "city":       body.bank_address_city or merchant.address_city,
+            "state":      body.bank_address_state or merchant.address_state,
+            "postalCode": body.bank_address_postal_code or merchant.address_postal_code,
+        }
+        missing = [key for key, value in fields.items() if not value]
+        if missing:
+            raise HTTPException(
+                400,
+                f"bank address incomplete for {rail} destinations: "
+                f"missing {', '.join(missing)}",
+            )
+        address.update(fields)
+
+    return {"name": name, "address": address}
 
 
 def _fmt(dest: Destination) -> dict:
@@ -67,23 +185,21 @@ def _create_destination_for_merchant(merchant: Merchant, body: DestinationReques
     if errors:
         raise HTTPException(400, ". ".join(errors))
 
-    # PIX and SPEI destinations don't take a `holder` in the Lumx schema —
-    # only customerId, name, rail, currency and identifier. Sending a partial
-    # holder makes the API reject the request with VALIDATION_ERROR.
+    # PIX destinations don't take a `holder` in the Lumx schema — only
+    # customerId, name, rail, currency and identifier. SPEI wants type + taxId.
     lumx_payload: dict[str, Any] = {
         "customerId": merchant.lumx_customer_id,
         "name":       body.label or body.holder_name,
         "rail":       rail_cfg.rail,
         "currency":   rail_cfg.currency,
-        "identifier": body.identifier,
+        "identifier": _normalise_identifier(rail_cfg.rail, body.identifier),
     }
 
-    if rail_cfg.rail not in {"PIX", "SPEI"}:
-        lumx_payload["holder"] = {
-            "type":         "INDIVIDUAL",
-            "relationship": "SELF",
-            "name":         body.holder_name,
-        }
+    if rail_cfg.rail in HOLDER_REQUIRED_RAILS or rail_cfg.rail == "SPEI":
+        lumx_payload["holder"] = _holder_block(merchant, body, rail_cfg.rail)
+
+    if rail_cfg.rail in BANK_REQUIRED_RAILS:
+        lumx_payload["bank"] = _bank_block(merchant, body, rail_cfg.rail)
 
     try:
         lumx_dest = lumx.create_destination(
@@ -106,7 +222,7 @@ def _create_destination_for_merchant(merchant: Merchant, body: DestinationReques
         rail                = rail_cfg.rail,
         currency            = rail_cfg.currency,
         country             = body.country.upper(),
-        identifier          = body.identifier,
+        identifier          = lumx_payload["identifier"],
         holder_name         = body.holder_name,
     )
     db.add(destination)
