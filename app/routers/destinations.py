@@ -45,6 +45,10 @@ class DestinationRequest(BaseModel):
     # data (the destination holder is the merchant, relationship SELF).
     holder_tax_id:            Optional[str] = None
     holder_address_country:   Optional[str] = None
+    holder_address_line1:     Optional[str] = None
+    holder_address_city:      Optional[str] = None
+    holder_address_state:     Optional[str] = None
+    holder_address_postal_code: Optional[str] = None
     bank_name:                Optional[str] = None
     bank_address_country:     Optional[str] = None
     bank_address_line1:       Optional[str] = None
@@ -92,16 +96,16 @@ def _holder_block(merchant: Merchant, body: DestinationRequest, rail: str) -> di
 
     holder: dict[str, Any] = {
         "type": "BUSINESS" if merchant.business_type == "BUSINESS" else "INDIVIDUAL",
-        "relationship": "SELF",
         "taxId": tax_id,
     }
 
-    # SPEI only takes type + taxId (+ name); sending relationship/address is
-    # accepted but unnecessary. ACH/FEDWIRE have no `name` property (it is
-    # `legalName`), and sending one fails with "property name should not exist".
+    # SPEI only takes type + taxId + name. Sending relationship makes Lumx
+    # enforce SELF tax-ID matching, which the SPEI rail rejects.
     if rail == "SPEI":
         holder["name"] = body.holder_name
         return holder
+
+    holder["relationship"] = "SELF"
 
     country = (
         body.holder_address_country
@@ -110,15 +114,29 @@ def _holder_block(merchant: Merchant, body: DestinationRequest, rail: str) -> di
         or body.country
     )
     try:
-        holder["address"] = {"country": to_alpha3(country)}
+        address: dict[str, Any] = {"country": to_alpha3(country)}
     except UnsupportedCountry as exc:
         raise HTTPException(400, str(exc))
 
-    if rail in {"ACH", "FEDWIRE"}:
-        if holder["type"] == "BUSINESS":
-            holder["legalName"] = merchant.business_name or body.holder_name
-    else:
-        holder["name"] = body.holder_name
+    if rail in FULL_BANK_ADDRESS_RAILS:
+        # ACH / FEDWIRE use the full address schema for the holder too.
+        fields = {
+            "line1":      body.holder_address_line1 or merchant.address_line1,
+            "city":       body.holder_address_city or merchant.address_city,
+            "state":      body.holder_address_state or merchant.address_state,
+            "postalCode": body.holder_address_postal_code or merchant.address_postal_code,
+        }
+        missing = [key for key, value in fields.items() if not value]
+        if missing:
+            raise HTTPException(
+                400,
+                f"holder address incomplete for {rail} destinations: "
+                f"missing {', '.join(missing)}",
+            )
+        address.update(fields)
+
+    holder["address"] = address
+    holder["name"] = body.holder_name
 
     return holder
 
@@ -211,7 +229,7 @@ def _create_destination_for_merchant(merchant: Merchant, body: DestinationReques
     except LumxError as exc:
         raise HTTPException(
             502,
-            f"Failed to register destination with payment network: {exc.body[:400]}",
+            f"Failed to register destination with payment network: {exc.body[:900]}",
         )
     except Exception as exc:
         raise HTTPException(502, f"Failed to register destination with payment network: {exc}")
