@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     LUMX_TREASURY_WALLET: str = ""
     # Optional: leave empty to use the project's default blockchain.
     LUMX_BLOCKCHAIN: str = ""   # ETHEREUM | POLYGON | BASE | TRON | STELLAR
+    # Local-currency accounts requested on customer creation. Must be a subset
+    # of what Lumx enabled for your project (currently USD, EUR, MXN, GBP).
+    # Requesting a currency the project doesn't allow fails with BAD_REQUEST.
+    LUMX_ACCOUNTS: str = "USD,EUR,MXN,GBP"
 
     # App
     # Comma-separated list is allowed, e.g.
