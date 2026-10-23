@@ -23,10 +23,14 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-# Override sqlalchemy.url from DATABASE_URL env var
+# Override sqlalchemy.url from DATABASE_URL env var.
+# configparser treats "%" as interpolation syntax, so a percent-encoded
+# password (e.g. "@" -> "%40") must be escaped or set_main_option raises
+# "invalid interpolation syntax". Escaping with "%%" is undone when the
+# value is read back via get_main_option()/get_section().
 database_url = os.environ.get("DATABASE_URL")
 if database_url:
-    config.set_main_option("sqlalchemy.url", database_url)
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
