@@ -110,21 +110,29 @@ def create_charge(
     db.add(tx)
     db.flush()
 
+    lumx_payload: dict[str, Any] = {
+        "destinationId":  destination.lumx_destination_id,
+        "sourceCurrency": "USDC",
+        "sourceAmount":   f"{body.amount:.2f}",
+        "purpose":        "TRADE_TRANSACTIONS",
+        "memo":           body.reference_id or charge_id,
+        "metadata": {
+            "agilepay_charge_id":      charge_id,
+            "agilepay_transaction_id": str(tx.id),
+        },
+    }
+
+    # Let Lumx use the project's default blockchain unless one is configured —
+    # hardcoding a chain that the customer has no wallet on returns
+    # ACCOUNT_NOT_FOUND. Same for partner fees: only send a real UUID.
+    if settings.LUMX_BLOCKCHAIN:
+        lumx_payload["blockchain"] = settings.LUMX_BLOCKCHAIN
+    if settings.LUMX_PARTNER_FEE_ID:
+        lumx_payload["partnerFeeId"] = settings.LUMX_PARTNER_FEE_ID
+
     try:
         lumx_response = lumx.create_offramp(
-            payload={
-                "destinationId":  destination.lumx_destination_id,
-                "sourceCurrency": "USDC",
-                "sourceAmount":   f"{body.amount:.2f}",
-                "purpose":        "TRADE_TRANSACTIONS",
-                "blockchain":     "BASE",
-                "partnerFeeId":   settings.LUMX_PARTNER_FEE_ID,
-                "memo":           body.reference_id or charge_id,
-                "metadata": {
-                    "agilepay_charge_id":      charge_id,
-                    "agilepay_transaction_id": str(tx.id),
-                },
-            },
+            payload=lumx_payload,
             idempotency_key=str(uuid.uuid4()),
         )
     except LumxError as exc:

@@ -14,9 +14,11 @@ class Settings(BaseSettings):
     # Lumx
     LUMX_API_KEY: str
     LUMX_BASE_URL: str = "https://api-sandbox.lumx.io"
-    LUMX_PARTNER_FEE_ID: str
+    LUMX_PARTNER_FEE_ID: str = ""
     LUMX_WEBHOOK_SECRET: str
-    LUMX_TREASURY_WALLET: str
+    LUMX_TREASURY_WALLET: str = ""
+    # Optional: leave empty to use the project's default blockchain.
+    LUMX_BLOCKCHAIN: str = ""   # ETHEREUM | POLYGON | BASE | TRON | STELLAR
 
     # App
     # Comma-separated list is allowed, e.g.
