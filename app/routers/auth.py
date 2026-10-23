@@ -42,7 +42,7 @@ class SignupRequest(BaseModel):
     business_name: Optional[str] = None
     business_type: Optional[str] = "INDIVIDUAL"   # INDIVIDUAL | BUSINESS
     country:       Optional[str] = "GH"           # alpha-2 or alpha-3
-    account_type:  Optional[str] = "DEVELOPER"    # DEVELOPER | MERCHANT | INDIVIDUAL
+    account_type:  Optional[str] = "MERCHANT"    # MERCHANT | INDIVIDUAL (DEVELOPER = legacy)
     # Required for INDIVIDUAL customers (KYC)
     tax_id:        Optional[str] = None
     birth_date:    Optional[str] = None           # "YYYY-MM-DD"
@@ -200,9 +200,9 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
     db.add(merchant)
     db.flush()
 
-    # 4. Issue default TEST API key (DEVELOPER only) ───────────────────────────
+    # 4. Issue default TEST API key (business accounts) ────────────────────────
     test_api_key: Optional[str] = None
-    if body.account_type == "DEVELOPER":
+    if body.account_type in {"DEVELOPER", "MERCHANT"}:
         raw_key, key_hash, prefix, last_four = generate_api_key("TEST")
         api_key_row = ApiKey(
             merchant_id     = merchant.id,

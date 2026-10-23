@@ -29,7 +29,7 @@ class Merchant(Base):
     tos_accepted_at = Column(DateTime(timezone=True))
 
     # Account flags
-    account_type = Column(SAEnum(AccountType), default=AccountType.DEVELOPER)
+    account_type = Column(SAEnum(AccountType), default=AccountType.MERCHANT)
     status       = Column(SAEnum(MerchantStatus), default=MerchantStatus.PENDING)
     is_live      = Column(Boolean, default=False)
     is_sandbox   = Column(Boolean, default=True)

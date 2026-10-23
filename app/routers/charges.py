@@ -69,8 +69,6 @@ def create_charge(
     merchant = db.query(Merchant).filter(Merchant.id == ctx.merchant_id).first()
 
     # Account type gate
-    if merchant.account_type.value == "MERCHANT":
-        raise HTTPException(403, "Charges API not available for no-code accounts. Use payment links.")
     if merchant.account_type.value == "INDIVIDUAL":
         raise HTTPException(403, "Charges API not available for individual accounts. Use remittance.")
 
