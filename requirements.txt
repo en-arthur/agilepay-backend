@@ -11,6 +11,8 @@ pydantic==2.14.1
 pydantic-settings==2.16.1
 httpx==0.28.1
 bcrypt==5.0.0
-PyJWT==2.15.1
+# [crypto] pulls in `cryptography`, required to verify ES256/RS256 Supabase
+# access tokens (new projects use asymmetric JWT signing keys).
+PyJWT[crypto]==2.15.1
 supabase==2.33.0
 python-dotenv==1.2.4

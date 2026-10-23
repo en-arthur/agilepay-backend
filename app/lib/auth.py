@@ -1,9 +1,11 @@
 import re
 from datetime import datetime, timezone
+from functools import lru_cache
 
 import bcrypt
 import jwt
 from fastapi import Depends, Header, HTTPException
+from jwt import PyJWKClient
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -13,6 +15,35 @@ from app.models.merchant import Merchant
 
 
 # ── Supabase JWT auth — dashboard / user-facing routes ───────────────────────
+
+@lru_cache(maxsize=1)
+def _jwks_client() -> PyJWKClient:
+    """
+    Supabase projects created after the JWT-signing-keys migration sign access
+    tokens with an asymmetric key (ES256/RS256) instead of the legacy shared
+    HS256 secret. Public keys are published as a JWKS document.
+    """
+    return PyJWKClient(
+        f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json",
+        cache_keys=True,
+    )
+
+
+def _decode_supabase_jwt(token: str) -> dict:
+    header = jwt.get_unverified_header(token)
+    alg = header.get("alg", "")
+
+    if alg == "HS256":
+        # Legacy projects: shared secret from Settings → API → JWT Secret.
+        key = settings.SUPABASE_JWT_SECRET
+    elif alg in {"ES256", "RS256"}:
+        # New projects: verify against the project's JWKS.
+        key = _jwks_client().get_signing_key_from_jwt(token).key
+    else:
+        raise jwt.InvalidTokenError(f"Unsupported JWT algorithm: {alg}")
+
+    return jwt.decode(token, key, algorithms=[alg], audience="authenticated")
+
 
 def get_current_merchant(
     authorization: str | None = Header(None),
@@ -35,12 +66,7 @@ def get_current_merchant(
         )
 
     try:
-        payload = jwt.decode(
-            token,
-            settings.SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
+        payload = _decode_supabase_jwt(token)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:

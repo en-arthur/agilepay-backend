@@ -74,8 +74,10 @@ class LumxClient:
         payload: dict,
         idempotency_key: str,
     ) -> dict:
+        # Lumx expects the customer on the body, not in the path:
+        # POST /destinations  { "customerId": ..., "rail": ..., ... }
         return self.post(
-            f"/customers/{customer_id}/destinations",
+            "/destinations",
             payload,
             idempotency_key=idempotency_key,
         )
