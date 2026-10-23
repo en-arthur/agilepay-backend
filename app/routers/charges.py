@@ -17,7 +17,7 @@ from app.lib.ids import generate_charge_id
 from app.models.destination import Destination
 from app.models.merchant import Merchant
 from app.models.transaction import Transaction
-from app.services.lumx import lumx
+from app.services.lumx import LumxError, lumx
 
 router = APIRouter()
 
@@ -126,6 +126,13 @@ def create_charge(
                 },
             },
             idempotency_key=str(uuid.uuid4()),
+        )
+    except LumxError as exc:
+        tx.status = "FAILED"
+        db.commit()
+        raise HTTPException(
+            502,
+            f"Payment network rejected the charge: {exc.body[:400]}",
         )
     except Exception:
         tx.status = "FAILED"
