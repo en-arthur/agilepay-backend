@@ -22,6 +22,14 @@ from app.services.lumx import LumxError, lumx
 router = APIRouter()
 
 
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 class ChargeRequest(BaseModel):
     amount:          float
     destination_id:  str
@@ -127,7 +135,7 @@ def create_charge(
     # ACCOUNT_NOT_FOUND. Same for partner fees: only send a real UUID.
     if settings.LUMX_BLOCKCHAIN:
         lumx_payload["blockchain"] = settings.LUMX_BLOCKCHAIN
-    if settings.LUMX_PARTNER_FEE_ID:
+    if _is_uuid(settings.LUMX_PARTNER_FEE_ID):
         lumx_payload["partnerFeeId"] = settings.LUMX_PARTNER_FEE_ID
 
     try:

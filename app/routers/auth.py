@@ -81,7 +81,9 @@ def _customer_payload(body: SignupRequest) -> dict:
     except UnsupportedCountry as exc:
         raise HTTPException(400, str(exc))
 
-    accounts = ["USD"]
+    # Provision every local-currency account Lumx supports on day one;
+    # an off-ramp to a rail whose account is missing returns ACCOUNT_NOT_FOUND.
+    accounts = ["BRL", "MXN", "EUR", "USD", "GBP"]
 
     if body.business_type == "BUSINESS":
         missing = [
