@@ -238,7 +238,10 @@ def _handle_event(event_type: str, data: dict, db: Session) -> None:
         return
 
     # ── Destinations ─────────────────────────────────────────────────────────
-    if event_type.startswith("destinations."):
+    # Lumx emits `destination.approved` (singular). Accept the plural form too
+    # so both the documented and the observed naming are handled.
+    if event_type.startswith(("destination.", "destinations.")):
+        suffix = event_type.split(".", 1)[1]
         destination = (
             db.query(Destination)
             .filter(Destination.lumx_destination_id == data.get("id"))
@@ -246,11 +249,11 @@ def _handle_event(event_type: str, data: dict, db: Session) -> None:
         )
         if not destination:
             return
-        if event_type == "destinations.approved":
+        if suffix == "approved":
             destination.status = "APPROVED"
-        elif event_type == "destinations.final_rejection":
+        elif suffix == "final_rejection":
             destination.status = "REJECTED"
-        elif event_type == "destinations.under_verification":
+        elif suffix in {"under_verification", "created", "temporary_rejection"}:
             destination.status = "PENDING"
         return
 
