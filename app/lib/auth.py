@@ -15,14 +15,14 @@ from app.models.merchant import Merchant
 # ── Supabase JWT auth — dashboard / user-facing routes ───────────────────────
 
 def get_current_merchant(
-    authorization: str = Header(...),
+    authorization: str | None = Header(None),
     db: Session = Depends(get_db),
 ) -> Merchant:
     """
     Verify the Supabase JWT sent as  Authorization: Bearer <token>
     and return the matching Merchant row.
     """
-    if not authorization.startswith("Bearer "):
+    if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
 
     token = authorization[7:]
@@ -66,14 +66,14 @@ class ApiKeyContext:
 
 
 def get_api_key_context(
-    authorization: str = Header(...),
+    authorization: str | None = Header(None),
     db: Session = Depends(get_db),
 ) -> ApiKeyContext:
     """
     Verify  Authorization: Bearer sk_live_xxx  or  sk_test_xxx.
     Uses bcrypt compare against stored hash — no plaintext stored.
     """
-    if not authorization.startswith("Bearer sk_"):
+    if not authorization or not authorization.startswith("Bearer sk_"):
         raise HTTPException(status_code=401, detail="Invalid API key format")
 
     raw_key = authorization[7:]  # strip "Bearer "

@@ -1,12 +1,16 @@
-fastapi[standard]
-uvicorn[standard]
-sqlalchemy
-alembic
-psycopg2-binary
-pydantic
-pydantic-settings
-httpx
-bcrypt
-PyJWT
-supabase
-python-dotenv
+fastapi[standard]==0.161.1
+uvicorn[standard]==0.54.0
+sqlalchemy==2.1.6
+alembic==1.20.1
+
+# SQLAlchemy 2.1 uses psycopg (v3) as the default driver for postgresql:// URLs.
+# psycopg2-binary is no longer needed and was removed.
+psycopg[binary]==3.3.6
+
+pydantic==2.14.1
+pydantic-settings==2.16.1
+httpx==0.28.1
+bcrypt==5.0.0
+PyJWT==2.15.1
+supabase==2.33.0
+python-dotenv==1.2.4
