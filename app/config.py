@@ -19,11 +19,22 @@ class Settings(BaseSettings):
     LUMX_TREASURY_WALLET: str
 
     # App
+    # Comma-separated list is allowed, e.g.
+    #   https://agilepay-rosy.vercel.app,https://agilepay-git-main.vercel.app
     FRONTEND_URL: str = "http://localhost:3000"
     ENV: str = "development"
 
     class Config:
         env_file = ".env"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Exact browser origins allowed to call the API (no trailing slash)."""
+        return [
+            origin.strip().rstrip("/")
+            for origin in self.FRONTEND_URL.split(",")
+            if origin.strip()
+        ]
 
 
 settings = Settings()
