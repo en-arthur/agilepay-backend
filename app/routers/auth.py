@@ -191,7 +191,9 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
         account_type     = body.account_type,
         lumx_customer_id = lumx_customer["id"],
         kyc_sumsub_link  = lumx_customer.get("verification", {}).get("link"),
-        tax_id           = body.tax_id if body.account_type == "INDIVIDUAL" else None,
+        # KYC identity is required for every account type and is reused as the
+        # default holder tax ID on SELF payout destinations.
+        tax_id           = body.tax_id,
         birth_date       = datetime.strptime(body.birth_date, "%Y-%m-%d") if body.birth_date else None,
         phone            = body.phone,
     )
