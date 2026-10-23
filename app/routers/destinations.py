@@ -282,22 +282,6 @@ def list_destinations(
     return [_fmt(d) for d in dests]
 
 
-@router.get("/{destination_id}")
-def get_destination(
-    destination_id: str,
-    ctx: ApiKeyContext = Depends(get_api_key_context),
-    db:  Session = Depends(get_db),
-):
-    dest = (
-        db.query(Destination)
-        .filter(Destination.id == destination_id, Destination.merchant_id == ctx.merchant_id)
-        .first()
-    )
-    if not dest:
-        raise HTTPException(404, "Destination not found")
-    return _fmt(dest)
-
-
 @router.delete("/{destination_id}", status_code=200)
 def delete_destination(
     destination_id: str,
@@ -384,3 +368,26 @@ def dashboard_set_default(
     dest.is_default = True
     db.commit()
     return {"message": "Default destination updated", "id": destination_id}
+
+
+# ── GET /v1/destinations/{destination_id} ─────────────────────────────────────
+# Declared LAST on purpose: FastAPI matches routes in declaration order, so a
+# dynamic "/{destination_id}" route placed before "/dashboard" swallows
+# GET /v1/destinations/dashboard and rejects the dashboard JWT with
+# "Invalid API key format". Keeping it last lets every static /dashboard*
+# route win.
+
+@router.get("/{destination_id}")
+def get_destination(
+    destination_id: str,
+    ctx: ApiKeyContext = Depends(get_api_key_context),
+    db:  Session = Depends(get_db),
+):
+    dest = (
+        db.query(Destination)
+        .filter(Destination.id == destination_id, Destination.merchant_id == ctx.merchant_id)
+        .first()
+    )
+    if not dest:
+        raise HTTPException(404, "Destination not found")
+    return _fmt(dest)
