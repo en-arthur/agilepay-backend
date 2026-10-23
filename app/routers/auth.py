@@ -8,6 +8,7 @@ Creates:
   4. Default TEST API key (DEVELOPER accounts only)
 """
 from datetime import datetime
+import logging
 from typing import Optional
 import uuid
 
@@ -18,10 +19,13 @@ from supabase import create_client
 
 from app.config import settings
 from app.database import get_db
+from app.lib.countries import UnsupportedCountry, to_alpha3
 from app.lib.ids import generate_api_key
 from app.models.api_key import ApiKey
 from app.models.merchant import Merchant
 from app.services.lumx import lumx
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -36,12 +40,14 @@ class SignupRequest(BaseModel):
     password:      str
     full_name:     str
     business_name: Optional[str] = None
-    business_type: Optional[str] = "INDIVIDUAL"
-    country:       Optional[str] = "GH"
-    account_type:  Optional[str] = "DEVELOPER"  # DEVELOPER | MERCHANT | INDIVIDUAL
-    # INDIVIDUAL only
+    business_type: Optional[str] = "INDIVIDUAL"   # INDIVIDUAL | BUSINESS
+    country:       Optional[str] = "GH"           # alpha-2 or alpha-3
+    account_type:  Optional[str] = "DEVELOPER"    # DEVELOPER | MERCHANT | INDIVIDUAL
+    # Required for INDIVIDUAL customers (KYC)
     tax_id:        Optional[str] = None
-    birth_date:    Optional[str] = None   # "YYYY-MM-DD"
+    birth_date:    Optional[str] = None           # "YYYY-MM-DD"
+    # Required for BUSINESS customers (KYB)
+    incorporation_date: Optional[str] = None      # "YYYY-MM-DD"
     phone:         Optional[str] = None
 
 
@@ -52,13 +58,87 @@ REDIRECT_MAP = {
 }
 
 
+def _date(value: str | None, field: str) -> str:
+    """Validate a YYYY-MM-DD date and return it unchanged (Lumx format)."""
+    try:
+        datetime.strptime(value or "", "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, f"{field} must be in YYYY-MM-DD format")
+    return value  # type: ignore[return-value]
+
+
+def _customer_payload(body: SignupRequest) -> dict:
+    """
+    Build a POST /customers body that matches the Lumx schema.
+
+    INDIVIDUAL requires: type, name, taxId, birthDate, country (alpha-3), email
+    BUSINESS   requires: type, legalName, taxId, incorporationDate, country, email
+
+    Lumx rejects 2-letter country codes, so `country` is converted to alpha-3.
+    """
+    try:
+        country = to_alpha3(body.country)
+    except UnsupportedCountry as exc:
+        raise HTTPException(400, str(exc))
+
+    accounts = ["USD"]
+
+    if body.business_type == "BUSINESS":
+        missing = [
+            name for name, value in (
+                ("tax_id", body.tax_id),
+                ("incorporation_date", body.incorporation_date),
+                ("business_name", body.business_name),
+            )
+            if not value
+        ]
+        if missing:
+            raise HTTPException(
+                400,
+                f"{', '.join(missing)} required for BUSINESS customers",
+            )
+        return {
+            "type":              "BUSINESS",
+            "legalName":         body.business_name,
+            "taxId":             body.tax_id,
+            "incorporationDate": _date(body.incorporation_date, "incorporation_date"),
+            "country":           country,
+            "email":             body.email,
+            "accounts":          accounts,
+        }
+
+    missing = [
+        name for name, value in (
+            ("tax_id", body.tax_id),
+            ("birth_date", body.birth_date),
+        )
+        if not value
+    ]
+    if missing:
+        raise HTTPException(
+            400,
+            f"{', '.join(missing)} required for identity verification",
+        )
+
+    return {
+        "type":      "INDIVIDUAL",
+        "name":      body.full_name,
+        "taxId":     body.tax_id,
+        "birthDate": _date(body.birth_date, "birth_date"),
+        "country":   country,
+        "email":     body.email,
+        "accounts":  accounts,
+    }
+
+
 @router.post("/signup", status_code=201)
 def signup(body: SignupRequest, db: Session = Depends(get_db)):
     if body.account_type not in {"DEVELOPER", "MERCHANT", "INDIVIDUAL"}:
         raise HTTPException(400, "account_type must be DEVELOPER, MERCHANT, or INDIVIDUAL")
 
-    if body.account_type == "INDIVIDUAL" and (not body.tax_id or not body.birth_date):
-        raise HTTPException(400, "tax_id and birth_date required for INDIVIDUAL accounts")
+    # Validate everything that would make Lumx reject the request BEFORE
+    # creating the Supabase user, so a bad payload doesn't burn the email.
+    lumx_payload = _customer_payload(body)
 
     # 1. Create Supabase Auth user ─────────────────────────────────────────────
     try:
@@ -69,36 +149,35 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
             "user_metadata": {"account_type": body.account_type},
         })
     except Exception as exc:
-        if "already registered" in str(exc).lower():
+        message = str(exc)
+        if "already" in message.lower():
             raise HTTPException(409, "Email already registered")
-        raise HTTPException(400, str(exc))
+        raise HTTPException(400, message)
 
     auth_user_id: str = auth_response.user.id
 
     # 2. Create Lumx customer ──────────────────────────────────────────────────
-    if body.account_type == "INDIVIDUAL":
-        lumx_payload = {
-            "type":      "INDIVIDUAL",
-            "name":      body.full_name,
-            "email":     body.email,
-            "country":   body.country or "GH",
-            "taxId":     body.tax_id,
-            "birthDate": body.birth_date,
-            "accounts":  ["USD"],
-        }
-    else:
-        lumx_payload = {
-            "type":    "BUSINESS" if body.business_type == "BUSINESS" else "INDIVIDUAL",
-            "name":    body.business_name or body.full_name,
-            "email":   body.email,
-            "country": body.country or "GH",
-        }
-
     try:
-        lumx_customer = lumx.create_customer(lumx_payload, idempotency_key=str(uuid.uuid4()))
-    except Exception:
-        supabase_admin.auth.admin.delete_user(auth_user_id)
-        raise HTTPException(502, "Failed to provision payment account")
+        lumx_customer = lumx.create_customer(
+            lumx_payload, idempotency_key=str(uuid.uuid4())
+        )
+    except Exception as exc:
+        logger.exception("Lumx customer creation failed for %s", body.email)
+        try:
+            supabase_admin.auth.admin.delete_user(auth_user_id)
+        except Exception:  # noqa: BLE001 — nothing else we can do here
+            logger.exception("Could not roll back Supabase user %s", auth_user_id)
+
+        detail = "Failed to provision payment account"
+        response = getattr(exc, "response", None)
+        if response is not None:
+            try:
+                upstream = response.json()
+                reason = upstream.get("message") or upstream.get("error") or upstream
+                detail = f"{detail}: {str(reason)[:300]}"
+            except Exception:  # noqa: BLE001
+                detail = f"{detail}: HTTP {response.status_code}"
+        raise HTTPException(502, detail)
 
     # 3. Create merchant row ───────────────────────────────────────────────────
     merchant = Merchant(
