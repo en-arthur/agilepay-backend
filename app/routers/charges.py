@@ -110,7 +110,7 @@ def create_charge(
     db.add(tx)
     db.flush()
 
-    lumx_payload: dict[str, Any] = {
+    lumx_payload: dict = {
         "destinationId":  destination.lumx_destination_id,
         "sourceCurrency": "USDC",
         "sourceAmount":   f"{body.amount:.2f}",
