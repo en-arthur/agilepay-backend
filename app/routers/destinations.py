@@ -26,7 +26,7 @@ from app.lib.rails import get_rail_config, list_supported_countries
 from app.lib.validators import validate_destination_identifier
 from app.models.destination import Destination
 from app.models.merchant import Merchant
-from app.services.lumx import lumx
+from app.services.lumx import LumxError, lumx
 
 router = APIRouter()
 
@@ -67,21 +67,34 @@ def _create_destination_for_merchant(merchant: Merchant, body: DestinationReques
     if errors:
         raise HTTPException(400, ". ".join(errors))
 
+    # PIX and SPEI destinations don't take a `holder` in the Lumx schema —
+    # only customerId, name, rail, currency and identifier. Sending a partial
+    # holder makes the API reject the request with VALIDATION_ERROR.
+    lumx_payload: dict[str, Any] = {
+        "customerId": merchant.lumx_customer_id,
+        "name":       body.label or body.holder_name,
+        "rail":       rail_cfg.rail,
+        "currency":   rail_cfg.currency,
+        "identifier": body.identifier,
+    }
+
+    if rail_cfg.rail not in {"PIX", "SPEI"}:
+        lumx_payload["holder"] = {
+            "type":         "INDIVIDUAL",
+            "relationship": "SELF",
+            "name":         body.holder_name,
+        }
+
     try:
         lumx_dest = lumx.create_destination(
             customer_id=merchant.lumx_customer_id,
-            payload={
-                "customerId": merchant.lumx_customer_id,
-                "name":       body.label or body.holder_name,
-                "rail":       rail_cfg.rail,
-                "currency":   rail_cfg.currency,
-                "identifier": body.identifier,
-                "holder": {
-                    "name":         body.holder_name,
-                    "relationship": "SELF",
-                },
-            },
+            payload=lumx_payload,
             idempotency_key=str(uuid.uuid4()),
+        )
+    except LumxError as exc:
+        raise HTTPException(
+            502,
+            f"Failed to register destination with payment network: {exc.body[:400]}",
         )
     except Exception as exc:
         raise HTTPException(502, f"Failed to register destination with payment network: {exc}")
