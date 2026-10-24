@@ -200,9 +200,9 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
     db.add(merchant)
     db.flush()
 
-    # 4. Issue default TEST API key (business accounts) ────────────────────────
+    # 4. Issue default TEST API key (DEVELOPER only — legacy accounts) ─────────
     test_api_key: Optional[str] = None
-    if body.account_type in {"DEVELOPER", "MERCHANT"}:
+    if body.account_type == "DEVELOPER":
         raw_key, key_hash, prefix, last_four = generate_api_key("TEST")
         api_key_row = ApiKey(
             merchant_id     = merchant.id,

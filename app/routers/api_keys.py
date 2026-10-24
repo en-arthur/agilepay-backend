@@ -26,7 +26,7 @@ def list_api_keys(
     merchant: Merchant = Depends(get_current_merchant),
     db: Session = Depends(get_db),
 ):
-    require_account_type(merchant, "DEVELOPER", "MERCHANT")
+    require_account_type(merchant, "DEVELOPER")
     keys = (
         db.query(ApiKey)
         .filter(ApiKey.merchant_id == merchant.id, ApiKey.revoked_at.is_(None))
@@ -63,7 +63,7 @@ def create_api_key(
     merchant: Merchant = Depends(get_current_merchant),
     db: Session = Depends(get_db),
 ):
-    require_account_type(merchant, "DEVELOPER", "MERCHANT")
+    require_account_type(merchant, "DEVELOPER")
 
     env = body.environment or "TEST"
     if env not in {"TEST", "LIVE"}:
@@ -108,7 +108,7 @@ def revoke_api_key(
     merchant: Merchant = Depends(get_current_merchant),
     db: Session = Depends(get_db),
 ):
-    require_account_type(merchant, "DEVELOPER", "MERCHANT")
+    require_account_type(merchant, "DEVELOPER")
 
     key = (
         db.query(ApiKey)
