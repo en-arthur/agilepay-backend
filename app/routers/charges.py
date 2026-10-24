@@ -1,7 +1,18 @@
 """
-POST /v1/charges          — create a new off-ramp charge (DEVELOPER SDK)
-GET  /v1/charges          — list charges for the authenticated API key
-GET  /v1/charges/{id}     — retrieve a single charge
+Off-ramp charges — money OUT (USDC → fiat to a bank destination).
+
+  API-key auth (SDK / legacy developers):
+    POST /v1/charges
+    GET  /v1/charges
+    GET  /v1/charges/{id}
+
+  JWT auth (dashboard UI — no-code merchants):
+    POST /v1/charges/dashboard
+    GET  /v1/charges/dashboard
+    GET  /v1/charges/dashboard/balance
+
+Merchant accounts are no-code, so they never see an API key — the dashboard
+routes let them send a payout straight from the Payouts page.
 """
 from typing import Optional
 import uuid
@@ -12,7 +23,12 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.lib.auth import get_api_key_context, ApiKeyContext, require_scope
+from app.lib.auth import (
+    get_api_key_context,
+    get_current_merchant,
+    ApiKeyContext,
+    require_scope,
+)
 from app.lib.ids import generate_charge_id
 from app.models.destination import Destination
 from app.models.merchant import Merchant
@@ -56,42 +72,35 @@ def _fmt_charge(tx: Transaction) -> dict:
     }
 
 
-# ── POST /v1/charges ──────────────────────────────────────────────────────────
+# ── Shared creation logic (API key + dashboard) ──────────────────────────────
 
-@router.post("", status_code=202)
-def create_charge(
-    body: ChargeRequest,
-    ctx:  ApiKeyContext = Depends(get_api_key_context),
-    db:   Session = Depends(get_db),
-):
-    require_scope(ctx, "charges:create")
+def _create_charge(db: Session, merchant: Merchant, body: ChargeRequest) -> Transaction:
+    if body.amount is None or float(body.amount) <= 0:
+        raise HTTPException(400, "amount must be greater than zero")
 
-    merchant = db.query(Merchant).filter(Merchant.id == ctx.merchant_id).first()
-
-    # Account type gate
-    if merchant.account_type.value == "MERCHANT":
-        raise HTTPException(403, "Charges API not available for no-code accounts. Use payment links.")
+    # Account type gate — individuals use the remittance flow instead.
     if merchant.account_type.value == "INDIVIDUAL":
         raise HTTPException(403, "Charges API not available for individual accounts. Use remittance.")
 
-    # KYC gate for live keys
-    if ctx.environment == "LIVE" and merchant.kyc_status.value != "APPROVED":
-        raise HTTPException(403, "KYC verification required for live charges")
-
     # Idempotency
     if body.idempotency_key:
-        existing = db.query(Transaction).filter(
-            Transaction.idempotency_key == body.idempotency_key
-        ).first()
+        existing = (
+            db.query(Transaction)
+            .filter(
+                Transaction.merchant_id == merchant.id,
+                Transaction.idempotency_key == body.idempotency_key,
+            )
+            .first()
+        )
         if existing:
-            return _fmt_charge(existing)
+            return existing
 
     # Resolve approved destination
     destination = (
         db.query(Destination)
         .filter(
             Destination.id          == body.destination_id,
-            Destination.merchant_id == ctx.merchant_id,
+            Destination.merchant_id == merchant.id,
             Destination.status      == "APPROVED",
         )
         .first()
@@ -159,24 +168,14 @@ def create_charge(
     tx.status = "PROCESSING"
     db.commit()
     db.refresh(tx)
+    return tx
 
-    return _fmt_charge(tx)
 
-
-# ── GET /v1/charges ───────────────────────────────────────────────────────────
-
-@router.get("")
-def list_charges(
-    ctx: ApiKeyContext = Depends(get_api_key_context),
-    db:  Session = Depends(get_db),
-    limit: int = 20,
-    offset: int = 0,
-):
-    require_scope(ctx, "transactions:read")
-    txs = (
+def _list_charges(db: Session, merchant_id, limit: int, offset: int) -> list[Transaction]:
+    return (
         db.query(Transaction)
         .filter(
-            Transaction.merchant_id == ctx.merchant_id,
+            Transaction.merchant_id == merchant_id,
             Transaction.charge_id.like("chg_%"),
         )
         .order_by(Transaction.created_at.desc())
@@ -184,16 +183,108 @@ def list_charges(
         .offset(offset)
         .all()
     )
-    return [_fmt_charge(tx) for tx in txs]
 
 
-# ── GET /v1/charges/{charge_id} ───────────────────────────────────────────────
+# ── POST /v1/charges (API key) ───────────────────────────────────────────────
+
+@router.post("", status_code=202)
+def create_charge(
+    body: ChargeRequest,
+    ctx:  ApiKeyContext = Depends(get_api_key_context),
+    db:   Session = Depends(get_db),
+):
+    require_scope(ctx, "charges:create")
+
+    merchant = db.query(Merchant).filter(Merchant.id == ctx.merchant_id).first()
+
+    # KYC gate for live keys
+    if ctx.environment == "LIVE" and merchant.kyc_status.value != "APPROVED":
+        raise HTTPException(403, "KYC verification required for live charges")
+
+    return _fmt_charge(_create_charge(db, merchant, body))
+
+
+# ── GET /v1/charges (API key) ────────────────────────────────────────────────
+
+@router.get("")
+def list_charges(
+    ctx:   ApiKeyContext = Depends(get_api_key_context),
+    db:    Session = Depends(get_db),
+    limit: int = 20,
+    offset: int = 0,
+):
+    require_scope(ctx, "transactions:read")
+    return [_fmt_charge(tx) for tx in _list_charges(db, ctx.merchant_id, limit, offset)]
+
+
+# ── POST /v1/charges/dashboard (JWT — no-code merchants) ─────────────────────
+
+@router.post("/dashboard", status_code=202)
+def dashboard_create_charge(
+    body: ChargeRequest,
+    merchant: Merchant = Depends(get_current_merchant),
+    db:       Session = Depends(get_db),
+):
+    return _fmt_charge(_create_charge(db, merchant, body))
+
+
+# ── GET /v1/charges/dashboard (JWT) ──────────────────────────────────────────
+
+@router.get("/dashboard")
+def dashboard_list_charges(
+    merchant: Merchant = Depends(get_current_merchant),
+    db:       Session = Depends(get_db),
+    limit: int = 20,
+    offset: int = 0,
+):
+    return [_fmt_charge(tx) for tx in _list_charges(db, merchant.id, limit, offset)]
+
+
+# ── GET /v1/charges/dashboard/balance (JWT) ──────────────────────────────────
+
+@router.get("/dashboard/balance")
+def dashboard_balance(merchant: Merchant = Depends(get_current_merchant)):
+    """
+    USDC available for payouts, read from Lumx.
+
+    Balances are only returned by Lumx once the customer's KYC is APPROVED;
+    before that (or on a network error) we report 0 instead of failing the
+    page.
+    """
+    zero = {"currency": "USDC", "amount": "0.000000", "wallets": []}
+    if not merchant.lumx_customer_id:
+        return zero
+
+    try:
+        customer = lumx.get_customer(merchant.lumx_customer_id)
+    except Exception:
+        return zero
+
+    wallets = customer.get("wallets") or []
+    total = 0.0
+    for wallet in wallets:
+        for balance in wallet.get("balances") or []:
+            if (balance.get("currency") or "").upper() == "USDC":
+                try:
+                    total += float(balance.get("amount") or 0)
+                except (TypeError, ValueError):
+                    pass
+
+    return {
+        "currency": "USDC",
+        "amount":   f"{total:.6f}",
+        "wallets":  wallets,
+    }
+
+
+# ── GET /v1/charges/{charge_id} (API key) ────────────────────────────────────
+# Declared LAST so the static /dashboard routes above are not swallowed.
 
 @router.get("/{charge_id}")
 def get_charge(
     charge_id: str,
-    ctx: ApiKeyContext = Depends(get_api_key_context),
-    db:  Session = Depends(get_db),
+    ctx:  ApiKeyContext = Depends(get_api_key_context),
+    db:   Session = Depends(get_db),
 ):
     require_scope(ctx, "transactions:read")
     tx = (
