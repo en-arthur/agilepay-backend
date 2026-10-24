@@ -35,6 +35,7 @@ from app.models.destination import Destination
 from app.models.merchant import Merchant
 from app.models.transaction import Transaction
 from app.models.webhook_log import WebhookLog
+from app.services.collections import auto_settle_collection
 
 router = APIRouter()
 
@@ -286,6 +287,8 @@ def _handle_event(event_type: str, data: dict, db: Session) -> None:
         collection = _find_collection(db, data)
         if collection:
             _apply_collection_event(event_type, collection, data, now)
+            if collection.status == "COMPLETED":
+                auto_settle_collection(db, collection)
             return
 
     # ── Transactions ─────────────────────────────────────────────────────────

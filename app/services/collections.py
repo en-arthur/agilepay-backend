@@ -12,6 +12,7 @@ verbatim in `payment_details` so it can be rendered again at any time.
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
+import logging
 import uuid
 
 from fastapi import HTTPException
@@ -22,6 +23,13 @@ from app.lib.ids import generate_collection_id
 from app.models.collection import Collection
 from app.models.merchant import Merchant
 from app.services.lumx import LumxError, lumx
+from app.services.payouts import create_charge
+
+logger = logging.getLogger(__name__)
+
+# Lumx refuses off-ramps below this (USD equivalent). Smaller collections stay
+# in the USDC balance and can be paid out together later.
+AUTO_SETTLE_MIN_USDC = 50.0
 
 
 # Which rail can carry which source currency. Lumx on-ramp supports:
@@ -229,6 +237,62 @@ def create_collection(
     return collection
 
 
+def auto_settle_collection(db: Session, collection: Collection):
+    """
+    Send a completed collection's USDC to the merchant's bank automatically.
+
+    This is what makes checkout truly no-code: the merchant picks a payout
+    destination once when creating the link, then every paid checkout settles
+    itself — no Payouts click required.
+
+    No destination on the link, or a balance below Lumx's 50 USD floor, means
+    the funds stay in the USDC balance for a manual payout later.
+    """
+    if collection.status != "COMPLETED":
+        return None
+    if not collection.target_amount:
+        return None
+
+    try:
+        amount = float(collection.target_amount)
+    except (TypeError, ValueError):
+        return None
+    if amount < AUTO_SETTLE_MIN_USDC:
+        return None
+
+    merchant = collection.merchant
+    if not merchant:
+        return None
+
+    destination_id = None
+    link = collection.payment_link
+    if link and link.default_destination_id:
+        destination_id = link.default_destination_id
+
+    if not destination_id:
+        return None
+
+    try:
+        return create_charge(
+            db,
+            merchant,
+            amount          = round(amount, 2),
+            destination_id  = str(destination_id),
+            description     = f"Settlement for {collection.collection_id}",
+            reference_id    = collection.collection_id,
+            metadata        = {
+                "agilepay_collection_id": collection.collection_id,
+                "auto_settled":           True,
+            },
+            idempotency_key = f"autosettle:{collection.collection_id}",
+        )
+    except Exception:  # noqa: BLE001 — never fail a webhook/poll over a payout
+        logger.exception(
+            "Auto-settlement failed for collection %s", collection.collection_id
+        )
+        return None
+
+
 def refresh_collection(db: Session, collection: Collection) -> Collection:
     """
     Best-effort status sync from Lumx.
@@ -273,4 +337,8 @@ def refresh_collection(db: Session, collection: Collection) -> Collection:
         collection.failed_at = datetime.now(timezone.utc)
 
     db.commit()
+
+    if collection.status == "COMPLETED":
+        auto_settle_collection(db, collection)
+
     return collection
